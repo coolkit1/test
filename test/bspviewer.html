@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Playable BSP Viewer</title>
+    <style>
+        body { margin: 0; background: #000; color: #0f0; font-family: monospace; overflow: hidden; }
+        #overlay { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); padding: 10px; border: 1px solid #0f0; z-index: 100; }
+        #log { font-size: 10px; max-height: 150px; overflow-y: auto; color: #aaa; }
+        .label { pointer-events: none; background: rgba(0,0,0,0.6); padding: 2px; border: 1px solid #0f0; color: #0f0; font-size: 8px; }
+    </style>
+</head>
+<body>
+
+<div id="overlay">
+    <strong>BSP RENDERER</strong><br>
+    <input type="file" id="fileInput"><br>
+    <div id="status">Status: Ready</div>
+    <div id="log"></div>
+    <p style="font-size: 10px;">Click screen to lock mouse. WASD to fly, Space/Shift to go up/down.</p>
+</div>
+
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+    import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+    const status = document.getElementById('status');
+    const logBox = document.getElementById('log');
+    function log(msg) { const div = document.createElement('div'); div.textContent = `> ${msg}`; logBox.prepend(div); }
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 50000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.setSize(window.innerWidth, window.innerHeight);
+    labelRenderer.domElement.style.position = 'absolute';
+    labelRenderer.domElement.style.top = '0px';
+    labelRenderer.domElement.style.pointerEvents = 'none';
+    document.body.appendChild(labelRenderer.domElement);
+    
+    const controls = new PointerLockControls(camera, document.body);
+    document.addEventListener('click', () => controls.lock());
+    
+    scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+    let move = { f: false, b: false, l: false, r: false, u: false, d: false };
+    document.addEventListener('keydown', (e) => {
+        if(e.code==='KeyW') move.f=true; if(e.code==='KeyS') move.b=true;
+        if(e.code==='KeyA') move.l=true; if(e.code==='KeyD') move.r=true;
+        if(e.code==='Space') move.u=true; if(e.code==='ShiftLeft') move.d=true;
+    });
+    document.addEventListener('keyup', (e) => {
+        if(e.code==='KeyW') move.f=false; if(e.code==='KeyS') move.b=false;
+        if(e.code==='KeyA') move.l=false; if(e.code==='KeyD') move.r=false;
+        if(e.code==='Space') move.u=false; if(e.code==='ShiftLeft') move.d=false;
+    });
+
+    document.getElementById('fileInput').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const buffer = await file.arrayBuffer();
+        parseBSP(buffer);
+    });
+
+    function parseBSP(buffer) {
+        const objectsToRemove = [];
+        scene.traverse((obj) => {
+            if (obj.isMesh || obj.isCSS2DObject) {
+                objectsToRemove.push(obj);
+            }
+        });
+        objectsToRemove.forEach(obj => {
+            if (obj.isMesh) {
+                obj.geometry.dispose();
+                obj.material.dispose();
+            }
+            scene.remove(obj);
+        });
+
+        try {
+            const view = new DataView(buffer);
+            const isSource = view.getUint32(0, true) === 0x50534256;
+            const getLumpInfo = (index) => {
+                const entrySize = isSource ? 16 : 8;
+                const loc = 8 + (index * entrySize);
+                return { offset: view.getInt32(loc, true), length: view.getInt32(loc + 4, true) };
+            };
+
+            const vL = getLumpInfo(isSource ? 3 : 10);
+            const fL = getLumpInfo(isSource ? 7 : 13);
+            const eL = isSource ? getLumpInfo(12) : null;
+            const seL = isSource ? getLumpInfo(13) : null;
+            const iL = !isSource ? getLumpInfo(11) : null;
+
+            const vertices = [];
+            for (let i = 0; i < vL.length; i += (isSource ? 12 : 44)) {
+                vertices.push(view.getFloat32(vL.offset + i, true), view.getFloat32(vL.offset + i + 8, true), -view.getFloat32(vL.offset + i + 4, true));
+            }
+
+            const indices = [];
+            if (isSource) {
+                for (let i = 0; i < fL.length; i += 56) {
+                    const firstSE = view.getInt32(fL.offset + i + 4, true);
+                    const numSE = view.getInt16(fL.offset + i + 8, true);
+                    const faceIdx = [];
+                    for (let j = 0; j < numSE; j++) {
+                        const sEdge = view.getInt32(seL.offset + (firstSE + j) * 4, true);
+                        const v1 = view.getUint16(eL.offset + (Math.abs(sEdge) * 4), true);
+                        const v2 = view.getUint16(eL.offset + (Math.abs(sEdge) * 4) + 2, true);
+                        faceIdx.push(sEdge >= 0 ? v1 : v2);
+                    }
+                    for (let j = 1; j < faceIdx.length - 1; j++) indices.push(faceIdx[0], faceIdx[j], faceIdx[j+1]);
+                }
+            } else {
+                for (let i = 0; i < fL.length; i += 104) {
+                    const firstV = view.getInt32(fL.offset + i + 12, true);
+                    const numMV = view.getInt32(fL.offset + i + 24, true);
+                    const firstMV = view.getInt32(fL.offset + i + 20, true);
+                    for (let j = 0; j < numMV; j++) indices.push(firstV + view.getInt32(iL.offset + (firstMV + j) * 4, true));
+                }
+            }
+
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            geo.setIndex(indices);
+            scene.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })));
+
+            // Entity Parsing
+            const eLump = getLumpInfo(0);
+            const entityText = new TextDecoder().decode(new Uint8Array(buffer, eLump.offset, eLump.length));
+            const entityRegex = /\{([^}]+)\}/g;
+            let match;
+            while ((match = entityRegex.exec(entityText)) !== null) {
+                const block = match[1];
+                const classname = block.match(/"classname"\s+"([^"]+)"/)?.[1];
+                const targetname = block.match(/"targetname"\s+"([^"]+)"/)?.[1] || "unnamed";
+                const message = block.match(/"message"\s+"([^"]+)"/)?.[1];
+                const model = block.match(/"model"\s+"([^"]+)"/)?.[1]; // Extracted model
+                const originMatch = block.match(/"origin"\s+"(-?[\d\.]+)\s+(-?[\d\.]+)\s+(-?[\d\.]+)"/);
+                
+                if (originMatch && classname) {
+                    const div = document.createElement('div');
+                    div.className = 'label';
+                    div.innerHTML = `<strong>${classname}</strong><br>${targetname}${message ? `<br><em>"${message}"</em>` : ''}${model ? `<br><small>Model: ${model.split('/').pop()}</small>` : ''}`;
+                    const label = new CSS2DObject(div);
+                    label.position.set(parseFloat(originMatch[1]), parseFloat(originMatch[3]) + 20, -parseFloat(originMatch[2]));
+                    scene.add(label);
+                }
+            }
+            status.textContent = "Status: Loaded!";
+        } catch (err) { log("Error: " + err.message); }
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        if (controls.isLocked) {
+            const speed = 15;
+            if (move.f) controls.moveForward(speed);
+            if (move.b) controls.moveForward(-speed);
+            if (move.l) controls.moveRight(-speed);
+            if (move.r) controls.moveRight(speed);
+            if (move.u) camera.position.y += speed;
+            if (move.d) camera.position.y -= speed;
+        }
+        renderer.render(scene, camera);
+        labelRenderer.render(scene, camera);
+    }
+    animate();
+</script>
+</body>
+</html>
